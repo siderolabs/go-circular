@@ -25,9 +25,7 @@ type Reader struct {
 // Read implements io.Reader.
 func (r *Reader) Read(p []byte) (n int, err error) {
 	if atomic.LoadUint32(&r.closed) > 0 {
-		err = ErrClosed
-
-		return
+		return n, ErrClosed
 	}
 
 	r.buf.mu.Lock()
@@ -35,19 +33,15 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 
 	if r.off < r.buf.off-int64(r.buf.opt.MaxCapacity) {
 		// reader is falling too much behind
-		err = ErrOutOfSync
-
-		return
+		return n, ErrOutOfSync
 	}
 
 	if r.off == r.endOff {
-		err = io.EOF
-
-		return
+		return n, io.EOF
 	}
 
 	if len(p) == 0 {
-		return
+		return n, err
 	}
 
 	n = int(r.endOff - r.off)

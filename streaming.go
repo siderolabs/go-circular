@@ -26,13 +26,11 @@ type StreamingReader struct {
 // Read implements io.Reader.
 func (r *StreamingReader) Read(p []byte) (n int, err error) {
 	if atomic.LoadUint32(&r.closed) > 0 {
-		err = ErrClosed
-
-		return
+		return n, ErrClosed
 	}
 
 	if len(p) == 0 {
-		return
+		return n, err
 	}
 
 	r.buf.mu.Lock()
@@ -47,9 +45,7 @@ func (r *StreamingReader) Read(p []byte) (n int, err error) {
 		r.buf.cond.Wait()
 
 		if atomic.LoadUint32(&r.closed) > 0 {
-			err = ErrClosed
-
-			return
+			return n, ErrClosed
 		}
 	}
 

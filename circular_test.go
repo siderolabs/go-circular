@@ -4,6 +4,7 @@
 
 package circular_test
 
+//nolint:gci
 import (
 	"bytes"
 	"context"
@@ -49,7 +50,7 @@ func (suite *CircularSuite) TestWrites() {
 	suite.Require().Equal(8192, buf.Capacity())
 	suite.Require().EqualValues(6100, buf.Offset())
 
-	for i := 0; i < 20; i++ {
+	for i := range 20 {
 		l := 1 << i
 
 		n, err = buf.Write(make([]byte, l))
@@ -141,7 +142,7 @@ func (suite *CircularSuite) TestStreamingMultipleReaders() {
 
 	readers := make([]*circular.StreamingReader, n)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		readers[i] = buf.GetStreamingReader()
 	}
 
@@ -155,10 +156,8 @@ func (suite *CircularSuite) TestStreamingMultipleReaders() {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
-
-		i := i
 
 		go func() {
 			defer wg.Done()
