@@ -7,27 +7,33 @@ package circular
 
 import (
 	"fmt"
+	"math"
+	"slices"
 	"sync"
 )
 
 // Buffer implements circular buffer with a thread-safe writer,
 // that supports multiple readers each with its own offset.
 type Buffer struct {
-	// waking up readers on new writes
+	// waking up streaming readers on new writes
 	cond *sync.Cond
 
-	// data slice, might grow up to MaxCapacity, then used
+	// compressed chunks, ordered from the smallest offset to the largest
+	chunks []chunk
+
+	// the last uncompressed chunk, might grow up to MaxCapacity, then used
 	// as circular buffer
 	data []byte
 
-	// synchronizing access to data, off
+	// buffer options
+	opt Options
+
+	// synchronizing access to data, off, chunks
 	mu sync.Mutex
 
 	// write offset, always goes up, actual offset in data slice
 	// is (off % cap(data))
 	off int64
-
-	opt Options
 }
 
 // NewBuffer creates new Buffer with specified options.
@@ -86,11 +92,15 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 
 	var n int
 	for n < l {
+		rotate := false
+
 		i := int(buf.off % int64(buf.opt.MaxCapacity))
 
 		nn := buf.opt.MaxCapacity - i
 		if nn > len(p) {
 			nn = len(p)
+		} else {
+			rotate = true
 		}
 
 		copy(buf.data[i:], p[:nn])
@@ -98,6 +108,30 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 		buf.off += int64(nn)
 		n += nn
 		p = p[nn:]
+
+		if rotate && buf.opt.NumCompressedChunks > 0 {
+			var compressionBuf []byte
+
+			if len(buf.chunks) == buf.opt.NumCompressedChunks {
+				// going to drop the chunk, so reuse its buffer
+				compressionBuf = buf.chunks[0].compressed[:0]
+			}
+
+			compressed, err := buf.opt.Compressor.Compress(buf.data, compressionBuf)
+			if err != nil {
+				return n, err
+			}
+
+			buf.chunks = append(buf.chunks, chunk{
+				compressed:  compressed,
+				startOffset: buf.off - int64(buf.opt.MaxCapacity),
+				size:        int64(buf.opt.MaxCapacity),
+			})
+
+			if len(buf.chunks) > buf.opt.NumCompressedChunks {
+				buf.chunks = slices.Delete(buf.chunks, 0, 1)
+			}
+		}
 	}
 
 	buf.cond.Broadcast()
@@ -113,6 +147,47 @@ func (buf *Buffer) Capacity() int {
 	return cap(buf.data)
 }
 
+// NumCompressedChunks returns number of compressed chunks.
+func (buf *Buffer) NumCompressedChunks() int {
+	buf.mu.Lock()
+	defer buf.mu.Unlock()
+
+	return len(buf.chunks)
+}
+
+// TotalCompressedSize reports the overall memory used by the circular buffer including compressed chunks.
+func (buf *Buffer) TotalCompressedSize() int64 {
+	buf.mu.Lock()
+	defer buf.mu.Unlock()
+
+	var size int64
+
+	for _, c := range buf.chunks {
+		size += int64(len(c.compressed))
+	}
+
+	return size + int64(cap(buf.data))
+}
+
+// TotalSize reports overall number of bytes available for reading in the buffer.
+//
+// TotalSize might be higher than TotalCompressedSize, because compressed chunks
+// take less memory than uncompressed data.
+func (buf *Buffer) TotalSize() int64 {
+	buf.mu.Lock()
+	defer buf.mu.Unlock()
+
+	if len(buf.chunks) == 0 {
+		if buf.off < int64(cap(buf.data)) {
+			return buf.off
+		}
+
+		return int64(cap(buf.data))
+	}
+
+	return buf.off - buf.chunks[0].startOffset
+}
+
 // Offset returns current write offset (number of bytes written).
 func (buf *Buffer) Offset() int64 {
 	buf.mu.Lock()
@@ -121,23 +196,16 @@ func (buf *Buffer) Offset() int64 {
 	return buf.off
 }
 
-// GetStreamingReader returns StreamingReader object which implements io.ReadCloser, io.Seeker.
+// GetStreamingReader returns Reader object which implements io.ReadCloser, io.Seeker.
 //
 // StreamingReader starts at the most distant position in the past available.
-func (buf *Buffer) GetStreamingReader() *StreamingReader {
-	buf.mu.Lock()
-	defer buf.mu.Unlock()
+func (buf *Buffer) GetStreamingReader() *Reader {
+	r := buf.GetReader()
 
-	off := buf.off - int64(buf.opt.MaxCapacity-buf.opt.SafetyGap)
-	if off < 0 {
-		off = 0
-	}
+	r.endOff = math.MaxInt64
+	r.streaming = true
 
-	return &StreamingReader{
-		buf:        buf,
-		initialOff: off,
-		off:        off,
-	}
+	return r
 }
 
 // GetReader returns Reader object which implements io.ReadCloser, io.Seeker.
@@ -147,6 +215,20 @@ func (buf *Buffer) GetStreamingReader() *StreamingReader {
 func (buf *Buffer) GetReader() *Reader {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
+
+	if len(buf.chunks) > 0 {
+		oldestChunk := buf.chunks[0]
+
+		return &Reader{
+			buf: buf,
+
+			chunk: &oldestChunk,
+
+			startOff: oldestChunk.startOffset,
+			endOff:   buf.off,
+			off:      oldestChunk.startOffset,
+		}
+	}
 
 	off := buf.off - int64(buf.opt.MaxCapacity-buf.opt.SafetyGap)
 	if off < 0 {

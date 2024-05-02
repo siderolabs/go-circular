@@ -8,9 +8,21 @@ import "fmt"
 
 // Options defines settings for Buffer.
 type Options struct {
+	Compressor Compressor
+
 	InitialCapacity int
 	MaxCapacity     int
 	SafetyGap       int
+
+	NumCompressedChunks int
+}
+
+// Compressor implements an optional interface for chunk compression.
+//
+// Compress and Decompress append to the dest slice and return the result.
+type Compressor interface {
+	Compress(src, dest []byte) ([]byte, error)
+	Decompress(src, dest []byte) ([]byte, error)
 }
 
 // defaultOptions returns default initial values.
@@ -63,6 +75,22 @@ func WithSafetyGap(gap int) OptionFunc {
 		}
 
 		opt.SafetyGap = gap
+
+		return nil
+	}
+}
+
+// WithNumCompressedChunks sets number of compressed chunks to keep in the buffer.
+//
+// Default is to keep no compressed chunks, only uncompressed circular buffer is used.
+func WithNumCompressedChunks(num int, c Compressor) OptionFunc {
+	return func(opt *Options) error {
+		if num < 0 {
+			return fmt.Errorf("number of compressed chunks should be non-negative: %d", num)
+		}
+
+		opt.NumCompressedChunks = num
+		opt.Compressor = c
 
 		return nil
 	}

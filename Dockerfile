@@ -1,8 +1,8 @@
-# syntax = docker/dockerfile-upstream:1.7.0-labs
+# syntax = docker/dockerfile-upstream:1.7.1-labs
 
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2024-04-30T10:38:23Z by kres ebc009d.
+# Generated on 2024-05-08T13:07:24Z by kres 1e986af.
 
 ARG TOOLCHAIN
 
@@ -55,12 +55,13 @@ COPY go.sum go.sum
 RUN cd .
 RUN --mount=type=cache,target=/go/pkg go mod download
 RUN --mount=type=cache,target=/go/pkg go mod verify
+COPY ./zstd ./zstd
+COPY ./chunk.go ./chunk.go
 COPY ./circular.go ./circular.go
 COPY ./circular_test.go ./circular_test.go
 COPY ./errors.go ./errors.go
 COPY ./options.go ./options.go
 COPY ./reader.go ./reader.go
-COPY ./streaming.go ./streaming.go
 RUN --mount=type=cache,target=/go/pkg go list -mod=readonly all >/dev/null
 
 # runs gofumpt

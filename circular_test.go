@@ -8,415 +8,836 @@ package circular_test
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/suite"
+	"github.com/siderolabs/gen/xtesting/must"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/time/rate"
 
 	"github.com/siderolabs/go-circular"
+	"github.com/siderolabs/go-circular/zstd"
 )
 
-type CircularSuite struct {
-	suite.Suite
-}
+func TestWrites(t *testing.T) {
+	t.Parallel()
 
-func (suite *CircularSuite) TestWrites() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(100000))
-	suite.Require().NoError(err)
+	for _, test := range []struct {
+		name string
 
-	n, err := buf.Write(nil)
-	suite.Require().NoError(err)
-	suite.Require().Equal(0, n)
+		options []circular.OptionFunc
 
-	n, err = buf.Write(make([]byte, 100))
-	suite.Require().NoError(err)
-	suite.Require().Equal(100, n)
+		expectedNumCompressedChunks int
+		expectedTotalCompressedSize int64
+		expectedTotalSize           int64
+	}{
+		{
+			name: "no chunks",
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048), circular.WithMaxCapacity(100_000),
+			},
 
-	n, err = buf.Write(make([]byte, 1000))
-	suite.Require().NoError(err)
-	suite.Require().Equal(1000, n)
+			expectedNumCompressedChunks: 0,
+			expectedTotalCompressedSize: 100_000,
+			expectedTotalSize:           100_000,
+		},
+		{
+			name: "chunks",
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(100_000),
+				circular.WithNumCompressedChunks(5, must.Value(zstd.NewCompressor())(t)),
+			},
 
-	suite.Require().Equal(2048, buf.Capacity())
-	suite.Require().EqualValues(1100, buf.Offset())
+			expectedNumCompressedChunks: 5,
+			expectedTotalCompressedSize: 100_085,
+			expectedTotalSize:           554_675,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	n, err = buf.Write(make([]byte, 5000))
-	suite.Require().NoError(err)
-	suite.Require().Equal(5000, n)
+			req := require.New(t)
 
-	suite.Require().Equal(8192, buf.Capacity())
-	suite.Require().EqualValues(6100, buf.Offset())
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
 
-	for i := range 20 {
-		l := 1 << i
+			n, err := buf.Write(nil)
+			req.NoError(err)
+			req.Equal(0, n)
 
-		n, err = buf.Write(make([]byte, l))
-		suite.Require().NoError(err)
-		suite.Require().Equal(l, n)
-	}
+			n, err = buf.Write(make([]byte, 100))
+			req.NoError(err)
+			req.Equal(100, n)
 
-	suite.Require().Equal(100000, buf.Capacity())
-	suite.Require().EqualValues(6100+(1<<20)-1, buf.Offset())
-}
+			n, err = buf.Write(make([]byte, 1000))
+			req.NoError(err)
+			req.Equal(1000, n)
 
-func (suite *CircularSuite) TestStreamingReadWriter() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(65536))
-	suite.Require().NoError(err)
+			req.Equal(2048, buf.Capacity())
+			req.EqualValues(1100, buf.Offset())
 
-	r := buf.GetStreamingReader()
+			n, err = buf.Write(make([]byte, 5000))
+			req.NoError(err)
+			req.Equal(5000, n)
 
-	size := 1048576
+			req.Equal(8192, buf.Capacity())
+			req.EqualValues(6100, buf.Offset())
 
-	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(rand.Int31())
-	}
+			for i := range 20 {
+				l := 1 << i
 
-	var wg sync.WaitGroup
-	defer wg.Wait()
-
-	wg.Add(1)
-
-	go func() {
-		defer wg.Done()
-
-		p := data
-
-		r := rate.NewLimiter(300_000, 1000)
-
-		for i := 0; i < len(data); {
-			l := 100 + rand.Intn(100)
-
-			if i+l > len(data) {
-				l = len(data) - i
+				n, err = buf.Write(make([]byte, l))
+				req.NoError(err)
+				req.Equal(l, n)
 			}
 
-			r.WaitN(context.Background(), l) //nolint:errcheck
+			req.Equal(100000, buf.Capacity())
+			req.EqualValues(6100+(1<<20)-1, buf.Offset())
 
-			n, e := buf.Write(p[:l])
-			suite.Require().NoError(e)
-			suite.Require().Equal(l, n)
-
-			i += l
-			p = p[l:]
-		}
-	}()
-
-	actual := make([]byte, size)
-
-	n, err := io.ReadFull(r, actual)
-	suite.Require().NoError(err)
-	suite.Require().Equal(size, n)
-
-	suite.Require().Equal(data, actual)
-
-	s := make(chan struct{})
-
-	go func() {
-		_, err = r.Read(make([]byte, 1))
-
-		suite.Assert().Equal(err, circular.ErrClosed)
-
-		close(s)
-	}()
-
-	time.Sleep(50 * time.Millisecond) // wait for the goroutine to start
-
-	suite.Require().NoError(r.Close())
-
-	// close should abort reader
-	<-s
-
-	_, err = r.Read(nil)
-	suite.Require().Equal(circular.ErrClosed, err)
+			req.EqualValues(test.expectedNumCompressedChunks, buf.NumCompressedChunks())
+			req.EqualValues(test.expectedTotalCompressedSize, buf.TotalCompressedSize())
+			req.EqualValues(test.expectedTotalSize, buf.TotalSize())
+		})
+	}
 }
 
-func (suite *CircularSuite) TestStreamingMultipleReaders() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(65536))
-	suite.Require().NoError(err)
+func TestStreamingReadWriter(t *testing.T) {
+	t.Parallel()
 
-	n := 5
+	for _, test := range []struct {
+		name string
 
-	readers := make([]*circular.StreamingReader, n)
+		options []circular.OptionFunc
+	}{
+		{
+			name: "no chunks",
 
-	for i := range n {
-		readers[i] = buf.GetStreamingReader()
-	}
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+			},
+		},
+		{
+			name: "chunks",
 
-	size := 1048576
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(16384),
+				circular.WithNumCompressedChunks(4, must.Value(zstd.NewCompressor())(t)),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(rand.Int31())
-	}
+			req := require.New(t)
+			asrt := assert.New(t)
 
-	var wg sync.WaitGroup
-	defer wg.Wait()
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
 
-	for i := range n {
-		wg.Add(1)
+			r := buf.GetStreamingReader()
 
-		go func() {
-			defer wg.Done()
+			size := 1048576
+
+			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, int64(size)))
+			req.NoError(err)
+
+			var wg sync.WaitGroup
+			defer wg.Wait()
+
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				p := data
+
+				r := rate.NewLimiter(300_000, 1000)
+
+				for i := 0; i < len(data); {
+					l := 100 + int(rand.Int32N(100))
+
+					if i+l > len(data) {
+						l = len(data) - i
+					}
+
+					r.WaitN(context.Background(), l) //nolint:errcheck
+
+					n, e := buf.Write(p[:l])
+					if e != nil {
+						panic(e)
+					}
+
+					if n != l {
+						panic(fmt.Sprintf("short write: %d != %d", n, l))
+					}
+
+					i += l
+					p = p[l:]
+				}
+			}()
 
 			actual := make([]byte, size)
 
-			nn, err := io.ReadFull(readers[i], actual)
-			suite.Require().NoError(err)
-			suite.Assert().Equal(size, nn)
+			n, err := io.ReadFull(r, actual)
+			req.NoError(err)
+			req.Equal(size, n)
 
-			suite.Assert().Equal(data, actual)
-		}()
-	}
+			req.Equal(data, actual)
 
-	p := data
+			s := make(chan error)
 
-	r := rate.NewLimiter(300_000, 1000)
+			go func() {
+				_, err = r.Read(make([]byte, 1))
 
-	for i := 0; i < len(data); {
-		l := 256
+				s <- err
+			}()
 
-		if i+l > len(data) {
-			l = len(data) - i
-		}
+			time.Sleep(50 * time.Millisecond) // wait for the goroutine to start
 
-		r.WaitN(context.Background(), l) //nolint:errcheck
+			req.NoError(r.Close())
 
-		n, e := buf.Write(p[:l])
-		suite.Require().NoError(e)
-		suite.Require().Equal(l, n)
+			// close should abort reader
+			asrt.ErrorIs(<-s, circular.ErrClosed)
 
-		i += l
-		p = p[l:]
+			_, err = r.Read(nil)
+			req.ErrorIs(err, circular.ErrClosed)
+		})
 	}
 }
 
-func (suite *CircularSuite) TestStreamingLateAndIdleReaders() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(65536), circular.WithSafetyGap(256))
-	suite.Require().NoError(err)
+//nolint:gocognit
+func TestStreamingMultipleReaders(t *testing.T) {
+	t.Parallel()
 
-	idleR := buf.GetStreamingReader()
+	for _, test := range []struct {
+		name string
 
-	size := 100000
+		options []circular.OptionFunc
+	}{
+		{
+			name: "no chunks",
 
-	data := make([]byte, size)
-	for i := range data {
-		data[i] = byte(rand.Int31())
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+			},
+		},
+		{
+			name: "chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(16384),
+				circular.WithNumCompressedChunks(4, must.Value(zstd.NewCompressor())(t)),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := require.New(t)
+
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			n := 5
+
+			readers := make([]*circular.Reader, n)
+
+			for i := range n {
+				readers[i] = buf.GetStreamingReader()
+			}
+
+			size := 1048576
+
+			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, int64(size)))
+			req.NoError(err)
+
+			var eg errgroup.Group
+
+			for _, reader := range readers {
+				eg.Go(func(reader *circular.Reader) func() error {
+					return func() error {
+						actual := make([]byte, size)
+
+						nn, err := io.ReadFull(reader, actual)
+						if err != nil {
+							return err
+						}
+
+						if size != nn {
+							return fmt.Errorf("short read: %d != %d", nn, size)
+						}
+
+						if !bytes.Equal(data, actual) {
+							return fmt.Errorf("data mismatch")
+						}
+
+						return nil
+					}
+				}(reader))
+			}
+
+			p := data
+
+			r := rate.NewLimiter(300_000, 1000)
+
+			for i := 0; i < len(data); {
+				l := 256
+
+				if i+l > len(data) {
+					l = len(data) - i
+				}
+
+				r.WaitN(context.Background(), l) //nolint:errcheck
+
+				n, e := buf.Write(p[:l])
+				req.NoError(e)
+				req.Equal(l, n)
+
+				i += l
+				p = p[l:]
+			}
+
+			req.NoError(eg.Wait())
+		})
 	}
-
-	n, err := buf.Write(data)
-	suite.Require().NoError(err)
-	suite.Require().Equal(size, n)
-
-	lateR := buf.GetStreamingReader()
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-
-		suite.Require().NoError(lateR.Close())
-	}()
-
-	actual, err := io.ReadAll(lateR)
-	suite.Require().Equal(circular.ErrClosed, err)
-	suite.Require().Equal(65536-256, len(actual))
-
-	suite.Require().Equal(data[size-65536+256:], actual)
-
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-
-		suite.Require().NoError(idleR.Close())
-	}()
-
-	actual, err = io.ReadAll(idleR)
-	suite.Require().Equal(circular.ErrClosed, err)
-	suite.Require().Equal(65536, len(actual))
-
-	suite.Require().Equal(data[size-65536:], actual)
 }
 
-func (suite *CircularSuite) TestStreamingSeek() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(65536), circular.WithSafetyGap(256))
-	suite.Require().NoError(err)
+func TestStreamingLateAndIdleReaders(t *testing.T) {
+	t.Parallel()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
-	suite.Require().NoError(err)
+	for _, test := range []struct {
+		name string
 
-	r := buf.GetStreamingReader()
+		options []circular.OptionFunc
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
-	suite.Require().NoError(err)
+		expectedLateReadSize int
+		expectedIdleReadSize int
+	}{
+		{
+			name: "no chunks",
 
-	off, err := r.Seek(0, io.SeekCurrent)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(0, off)
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+				circular.WithSafetyGap(256),
+			},
 
-	data := make([]byte, 256)
+			expectedLateReadSize: 65536 - 256,
+			expectedIdleReadSize: 65536,
+		},
+		{
+			name: "chunks",
 
-	n, err := r.Read(data)
-	suite.Require().NoError(err)
-	suite.Assert().Equal(256, n)
-	suite.Assert().Equal(bytes.Repeat([]byte{0xff}, 256), data)
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(16384),
+				circular.WithSafetyGap(256),
+				circular.WithNumCompressedChunks(4, must.Value(zstd.NewCompressor())(t)),
+			},
 
-	off, err = r.Seek(0, io.SeekCurrent)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(256, off)
+			expectedLateReadSize: 67232,
+			expectedIdleReadSize: 16384,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	off, err = r.Seek(-256, io.SeekEnd)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(768, off)
+			req := require.New(t)
 
-	n, err = r.Read(data)
-	suite.Require().NoError(err)
-	suite.Assert().Equal(256, n)
-	suite.Assert().Equal(bytes.Repeat([]byte{0xfe}, 256), data)
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
 
-	off, err = r.Seek(2048, io.SeekStart)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(1024, off)
+			idleR := buf.GetStreamingReader()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
-	suite.Require().NoError(err)
+			size := 100000
 
-	off, err = r.Seek(0, io.SeekStart)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(1024, off)
+			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, int64(size)))
+			req.NoError(err)
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 1024))
-	suite.Require().NoError(err)
+			n, err := buf.Write(data)
+			req.NoError(err)
+			req.Equal(size, n)
 
-	off, err = r.Seek(0, io.SeekCurrent)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(2048, off)
+			lateR := buf.GetStreamingReader()
 
-	_, err = r.Seek(-100, io.SeekStart)
-	suite.Require().Equal(circular.ErrSeekBeforeStart, err)
+			closeCh := make(chan error)
+
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+
+				closeCh <- lateR.Close()
+			}()
+
+			actual, err := io.ReadAll(lateR)
+			req.Equal(circular.ErrClosed, err)
+			req.Equal(test.expectedLateReadSize, len(actual))
+
+			req.Equal(data[size-test.expectedLateReadSize:], actual)
+
+			req.NoError(<-closeCh)
+
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+
+				closeCh <- idleR.Close()
+			}()
+
+			actual, err = io.ReadAll(idleR)
+			req.Equal(circular.ErrClosed, err)
+			req.Equal(test.expectedIdleReadSize, len(actual))
+
+			req.Equal(data[size-test.expectedIdleReadSize:], actual)
+
+			req.NoError(<-closeCh)
+		})
+	}
 }
 
-func (suite *CircularSuite) TestRegularReaderEmpty() {
-	buf, err := circular.NewBuffer()
-	suite.Require().NoError(err)
+func TestStreamingSeek(t *testing.T) {
+	t.Parallel()
 
-	n, err := buf.GetReader().Read(nil)
-	suite.Require().Equal(0, n)
-	suite.Require().Equal(io.EOF, err)
+	for _, test := range []struct {
+		name string
+
+		options []circular.OptionFunc
+
+		expectedOverflowSeek1 int64
+		expectedOverflowSeek2 int64
+	}{
+		{
+			name: "no chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+				circular.WithSafetyGap(256),
+			},
+
+			expectedOverflowSeek1: 1024,
+			expectedOverflowSeek2: 2048,
+		},
+		{
+			name: "chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(16384),
+				circular.WithSafetyGap(256),
+				circular.WithNumCompressedChunks(3, must.Value(zstd.NewCompressor())(t)),
+			},
+
+			expectedOverflowSeek1: 16384,
+			expectedOverflowSeek2: 16384,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := require.New(t)
+			asrt := assert.New(t)
+
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
+			req.NoError(err)
+
+			r := buf.GetStreamingReader()
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
+			req.NoError(err)
+
+			off, err := r.Seek(0, io.SeekCurrent)
+			req.NoError(err)
+			asrt.EqualValues(0, off)
+
+			data := make([]byte, 256)
+
+			n, err := r.Read(data)
+			req.NoError(err)
+			asrt.Equal(256, n)
+			asrt.Equal(bytes.Repeat([]byte{0xff}, 256), data)
+
+			off, err = r.Seek(0, io.SeekCurrent)
+			req.NoError(err)
+			asrt.EqualValues(256, off)
+
+			off, err = r.Seek(-256, io.SeekEnd)
+			req.NoError(err)
+			asrt.EqualValues(768, off)
+
+			n, err = r.Read(data)
+			req.NoError(err)
+			asrt.Equal(256, n)
+			asrt.Equal(bytes.Repeat([]byte{0xfe}, 256), data)
+
+			off, err = r.Seek(2048, io.SeekStart)
+			req.NoError(err)
+			asrt.EqualValues(1024, off)
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
+			req.NoError(err)
+
+			off, err = r.Seek(0, io.SeekStart)
+			req.NoError(err)
+			asrt.EqualValues(test.expectedOverflowSeek1, off)
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 1024))
+			req.NoError(err)
+
+			off, err = r.Seek(0, io.SeekCurrent)
+			req.NoError(err)
+			asrt.EqualValues(test.expectedOverflowSeek2, off)
+
+			_, err = r.Seek(-100, io.SeekStart)
+			req.ErrorIs(err, circular.ErrSeekBeforeStart)
+		})
+	}
 }
 
-func (suite *CircularSuite) TestRegularReader() {
-	buf, err := circular.NewBuffer()
-	suite.Require().NoError(err)
+func TestRegularReaderEmpty(t *testing.T) {
+	t.Parallel()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
-	suite.Require().NoError(err)
+	for _, test := range []struct {
+		name string
 
-	r := buf.GetReader()
+		options []circular.OptionFunc
+	}{
+		{
+			name: "no chunks",
+		},
+		{
+			name: "chunks",
+			options: []circular.OptionFunc{
+				circular.WithNumCompressedChunks(5, must.Value(zstd.NewCompressor())(t)),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
-	suite.Require().NoError(err)
+			req := require.New(t)
 
-	actual, err := io.ReadAll(r)
-	suite.Require().NoError(err)
-	suite.Require().Equal(bytes.Repeat([]byte{0xff}, 512), actual)
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			n, err := buf.GetReader().Read(nil)
+			req.Equal(0, n)
+			req.Equal(io.EOF, err)
+		})
+	}
 }
 
-func (suite *CircularSuite) TestRegularReaderOutOfSync() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(65536), circular.WithSafetyGap(256))
-	suite.Require().NoError(err)
+func TestRegularReader(t *testing.T) {
+	t.Parallel()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
-	suite.Require().NoError(err)
+	for _, test := range []struct {
+		name string
 
-	r := buf.GetReader()
+		options []circular.OptionFunc
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
-	suite.Require().NoError(err)
+		size int
+	}{
+		{
+			name: "no chunks",
 
-	_, err = r.Read(nil)
-	suite.Require().Equal(err, circular.ErrOutOfSync)
+			size: 512,
+		},
+		{
+			name: "chunks",
+			options: []circular.OptionFunc{
+				circular.WithMaxCapacity(65536),
+				circular.WithNumCompressedChunks(5, must.Value(zstd.NewCompressor())(t)),
+			},
+
+			size: 262144,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := require.New(t)
+
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, int64(test.size)))
+			req.NoError(err)
+
+			_, err = buf.Write(data)
+			req.NoError(err)
+
+			r := buf.GetReader()
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
+			req.NoError(err)
+
+			actual, err := io.ReadAll(r)
+			req.NoError(err)
+			req.Equal(data, actual)
+		})
+	}
 }
 
-func (suite *CircularSuite) TestRegularReaderFull() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(4096), circular.WithSafetyGap(256))
-	suite.Require().NoError(err)
+func TestRegularReaderOutOfSync(t *testing.T) {
+	t.Parallel()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xff}, 6146))
-	suite.Require().NoError(err)
+	for _, test := range []struct {
+		name string
 
-	r := buf.GetReader()
+		options []circular.OptionFunc
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 100))
-	suite.Require().NoError(err)
+		expectOutOfSync bool
+	}{
+		{
+			name: "no chunks",
 
-	actual, err := io.ReadAll(r)
-	suite.Require().NoError(err)
-	suite.Require().Equal(bytes.Repeat([]byte{0xff}, 4096-256), actual)
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+				circular.WithSafetyGap(256),
+			},
 
-	suite.Require().NoError(r.Close())
+			expectOutOfSync: true,
+		},
+		{
+			name: "chunks, no out of sync",
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+				circular.WithSafetyGap(256),
+				circular.WithNumCompressedChunks(5, must.Value(zstd.NewCompressor())(t)),
+			},
+		},
+		{
+			name: "not enough chunks",
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(2048),
+				circular.WithSafetyGap(256),
+				circular.WithNumCompressedChunks(2, must.Value(zstd.NewCompressor())(t)),
+			},
 
-	_, err = r.Read(nil)
-	suite.Require().Equal(err, circular.ErrClosed)
+			expectOutOfSync: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := require.New(t)
+
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, 512))
+			req.NoError(err)
+
+			_, err = buf.Write(data)
+			req.NoError(err)
+
+			r := buf.GetReader()
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
+			req.NoError(err)
+
+			actual := make([]byte, 512)
+			_, err = r.Read(actual)
+
+			if test.expectOutOfSync {
+				req.ErrorIs(err, circular.ErrOutOfSync)
+			} else {
+				req.NoError(err)
+				req.Equal(data, actual)
+			}
+		})
+	}
 }
 
-func (suite *CircularSuite) TestRegularSeek() {
-	buf, err := circular.NewBuffer(circular.WithInitialCapacity(2048), circular.WithMaxCapacity(65536), circular.WithSafetyGap(256))
-	suite.Require().NoError(err)
+func TestRegularReaderSafetyGap(t *testing.T) {
+	t.Parallel()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
-	suite.Require().NoError(err)
+	for _, test := range []struct {
+		name string
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
-	suite.Require().NoError(err)
+		options []circular.OptionFunc
 
-	r := buf.GetReader()
+		expectedBytesRead int
+	}{
+		{
+			name: "no chunks",
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfc}, 512))
-	suite.Require().NoError(err)
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(4096),
+				circular.WithSafetyGap(256),
+			},
 
-	off, err := r.Seek(0, io.SeekCurrent)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(0, off)
+			expectedBytesRead: 4096 - 256,
+		},
+		{
+			name: "chunks",
 
-	data := make([]byte, 256)
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(4096),
+				circular.WithSafetyGap(256),
+				circular.WithNumCompressedChunks(5, must.Value(zstd.NewCompressor())(t)),
+			},
 
-	n, err := r.Read(data)
-	suite.Require().NoError(err)
-	suite.Assert().Equal(256, n)
-	suite.Assert().Equal(bytes.Repeat([]byte{0xff}, 256), data)
+			expectedBytesRead: 6146,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 
-	off, err = r.Seek(0, io.SeekCurrent)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(256, off)
+			req := require.New(t)
 
-	off, err = r.Seek(-256, io.SeekEnd)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(768, off)
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
 
-	n, err = r.Read(data)
-	suite.Require().NoError(err)
-	suite.Assert().Equal(256, n)
-	suite.Assert().Equal(bytes.Repeat([]byte{0xfe}, 256), data)
+			_, err = buf.Write(bytes.Repeat([]byte{0xff}, 6146))
+			req.NoError(err)
 
-	off, err = r.Seek(2048, io.SeekStart)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(1024, off)
+			r := buf.GetReader()
 
-	_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
-	suite.Require().NoError(err)
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 100))
+			req.NoError(err)
 
-	off, err = r.Seek(0, io.SeekStart)
-	suite.Require().NoError(err)
-	suite.Assert().EqualValues(0, off)
+			actual, err := io.ReadAll(r)
+			req.NoError(err)
+			req.Equal(bytes.Repeat([]byte{0xff}, test.expectedBytesRead), actual)
 
-	_, err = r.Seek(-100, io.SeekStart)
-	suite.Require().Equal(circular.ErrSeekBeforeStart, err)
+			req.NoError(r.Close())
 
-	_, err = r.Read(nil)
-	suite.Require().Equal(circular.ErrOutOfSync, err)
+			_, err = r.Read(nil)
+			req.Equal(err, circular.ErrClosed)
+		})
+	}
 }
 
-func TestCircularSuite(t *testing.T) {
-	suite.Run(t, new(CircularSuite))
+func TestRegularSeek(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+
+		options []circular.OptionFunc
+
+		expectOutOfSync bool
+	}{
+		{
+			name: "no chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(65536),
+				circular.WithSafetyGap(256),
+			},
+
+			expectOutOfSync: true,
+		},
+		{
+			name: "chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(2048),
+				circular.WithMaxCapacity(16384),
+				circular.WithSafetyGap(256),
+				circular.WithNumCompressedChunks(5, must.Value(zstd.NewCompressor())(t)),
+			},
+		},
+		{
+			name: "tiny chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(256),
+				circular.WithMaxCapacity(256),
+				circular.WithSafetyGap(64),
+				circular.WithNumCompressedChunks(6, must.Value(zstd.NewCompressor())(t)),
+			},
+
+			expectOutOfSync: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := require.New(t)
+			asrt := assert.New(t)
+
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
+			req.NoError(err)
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
+			req.NoError(err)
+
+			r := buf.GetReader()
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfc}, 512))
+			req.NoError(err)
+
+			off, err := r.Seek(0, io.SeekCurrent)
+			req.NoError(err)
+			asrt.EqualValues(0, off)
+
+			data := make([]byte, 256)
+
+			n, err := r.Read(data)
+			req.NoError(err)
+			req.Equal(256, n)
+			req.Equal(bytes.Repeat([]byte{0xff}, 256), data)
+
+			off, err = r.Seek(0, io.SeekCurrent)
+			req.NoError(err)
+			asrt.EqualValues(256, off)
+
+			off, err = r.Seek(-256, io.SeekEnd)
+			req.NoError(err)
+			asrt.EqualValues(768, off)
+
+			n, err = r.Read(data)
+			req.NoError(err)
+			asrt.Equal(256, n)
+			asrt.Equal(bytes.Repeat([]byte{0xfe}, 256), data)
+
+			off, err = r.Seek(2048, io.SeekStart)
+			req.NoError(err)
+			asrt.EqualValues(1024, off)
+
+			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
+			req.NoError(err)
+
+			off, err = r.Seek(0, io.SeekStart)
+			req.NoError(err)
+			asrt.EqualValues(0, off)
+
+			_, err = r.Seek(-100, io.SeekStart)
+			req.ErrorIs(err, circular.ErrSeekBeforeStart)
+
+			singleByte := make([]byte, 1)
+			_, err = r.Read(singleByte)
+
+			if test.expectOutOfSync {
+				req.ErrorIs(err, circular.ErrOutOfSync)
+			} else {
+				req.NoError(err)
+				req.EqualValues(0xff, singleByte[0])
+			}
+		})
+	}
 }

@@ -1,14 +1,15 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2024-04-30T10:38:23Z by kres ebc009d.
+# Generated on 2024-05-08T13:07:24Z by kres 1e986af.
 
 *
+!zstd
+!chunk.go
 !circular.go
 !circular_test.go
 !errors.go
 !options.go
 !reader.go
-!streaming.go
 !go.mod
 !go.sum
 !.golangci.yml
