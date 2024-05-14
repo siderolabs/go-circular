@@ -1,14 +1,18 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2024-05-08T13:07:24Z by kres 1e986af.
+# Generated on 2024-05-16T11:12:28Z by kres ce88e1c.
 
 *
 !zstd
 !chunk.go
 !circular.go
+!circular_bench_test.go
 !circular_test.go
 !errors.go
 !options.go
+!options_test.go
+!persistence.go
+!persistence_test.go
 !reader.go
 !go.mod
 !go.sum

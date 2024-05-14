@@ -4,7 +4,6 @@
 
 package circular_test
 
-//nolint:gci
 import (
 	"bytes"
 	"context"

@@ -11,5 +11,6 @@ type chunk struct {
 	startOffset int64
 	// uncompressed size of the chunk
 	size int64
-	// [TODO]: have a unique (incrementing?) chunk ID for file-based storage
+	// unique chunk ID
+	id int64
 }

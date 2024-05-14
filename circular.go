@@ -10,6 +10,7 @@ import (
 	"math"
 	"slices"
 	"sync"
+	"sync/atomic"
 )
 
 // Buffer implements circular buffer with a thread-safe writer,
@@ -17,6 +18,9 @@ import (
 type Buffer struct {
 	// waking up streaming readers on new writes
 	cond *sync.Cond
+
+	// channel for persistence commands from the writer to the persistence goroutine
+	commandCh chan persistenceCommand
 
 	// compressed chunks, ordered from the smallest offset to the largest
 	chunks []chunk
@@ -27,6 +31,12 @@ type Buffer struct {
 
 	// buffer options
 	opt Options
+
+	// waitgroup to wait for persistence goroutine to finish
+	wg sync.WaitGroup
+
+	// closed flag (to disable writes after close)
+	closed atomic.Bool
 
 	// synchronizing access to data, off, chunks
 	mu sync.Mutex
@@ -59,14 +69,41 @@ func NewBuffer(opts ...OptionFunc) (*Buffer, error) {
 	buf.data = make([]byte, buf.opt.InitialCapacity)
 	buf.cond = sync.NewCond(&buf.mu)
 
+	if err := buf.load(); err != nil {
+		return nil, err
+	}
+
+	buf.run()
+
 	return buf, nil
 }
 
+// Close closes the buffer and waits for persistence goroutine to finish.
+func (buf *Buffer) Close() error {
+	if buf.closed.Swap(true) {
+		return nil
+	}
+
+	if buf.commandCh != nil {
+		close(buf.commandCh)
+	}
+
+	buf.wg.Wait()
+
+	return nil
+}
+
 // Write implements io.Writer interface.
+//
+//nolint:gocognit
 func (buf *Buffer) Write(p []byte) (int, error) {
 	l := len(p)
 	if l == 0 {
 		return 0, nil
+	}
+
+	if buf.closed.Load() {
+		return 0, ErrClosed
 	}
 
 	buf.mu.Lock()
@@ -122,13 +159,34 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 				return n, err
 			}
 
+			var maxID int64
+
+			for _, c := range buf.chunks {
+				maxID = max(c.id, maxID)
+			}
+
 			buf.chunks = append(buf.chunks, chunk{
 				compressed:  compressed,
 				startOffset: buf.off - int64(buf.opt.MaxCapacity),
 				size:        int64(buf.opt.MaxCapacity),
+				id:          maxID + 1,
 			})
 
+			if buf.commandCh != nil {
+				buf.commandCh <- persistenceCommand{
+					chunkID: maxID + 1,
+					data:    compressed,
+				}
+			}
+
 			if len(buf.chunks) > buf.opt.NumCompressedChunks {
+				if buf.commandCh != nil {
+					buf.commandCh <- persistenceCommand{
+						chunkID: buf.chunks[0].id,
+						drop:    true,
+					}
+				}
+
 				buf.chunks = slices.Delete(buf.chunks, 0, 1)
 			}
 		}
@@ -145,6 +203,11 @@ func (buf *Buffer) Capacity() int {
 	defer buf.mu.Unlock()
 
 	return cap(buf.data)
+}
+
+// MaxCapacity returns maximum number of (decompressed) bytes (including compressed chunks) that can be stored in the buffer.
+func (buf *Buffer) MaxCapacity() int {
+	return buf.opt.MaxCapacity * (buf.opt.NumCompressedChunks + 1)
 }
 
 // NumCompressedChunks returns number of compressed chunks.

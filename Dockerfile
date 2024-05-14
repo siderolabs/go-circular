@@ -2,7 +2,7 @@
 
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2024-05-08T13:07:24Z by kres 1e986af.
+# Generated on 2024-05-16T11:12:28Z by kres ce88e1c.
 
 ARG TOOLCHAIN
 
@@ -58,9 +58,13 @@ RUN --mount=type=cache,target=/go/pkg go mod verify
 COPY ./zstd ./zstd
 COPY ./chunk.go ./chunk.go
 COPY ./circular.go ./circular.go
+COPY ./circular_bench_test.go ./circular_bench_test.go
 COPY ./circular_test.go ./circular_test.go
 COPY ./errors.go ./errors.go
 COPY ./options.go ./options.go
+COPY ./options_test.go ./options_test.go
+COPY ./persistence.go ./persistence.go
+COPY ./persistence_test.go ./persistence_test.go
 COPY ./reader.go ./reader.go
 RUN --mount=type=cache,target=/go/pkg go list -mod=readonly all >/dev/null
 

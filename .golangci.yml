@@ -1,6 +1,6 @@
 # THIS FILE WAS AUTOMATICALLY GENERATED, PLEASE DO NOT EDIT.
 #
-# Generated on 2024-05-08T11:26:09Z by kres 1e986af.
+# Generated on 2024-05-16T11:12:28Z by kres ce88e1c.
 
 # options for analysis running
 run:
@@ -35,7 +35,7 @@ linters-settings:
     sections:
       - standard # Standard section: captures all standard packages.
       - default # Default section: contains all imports that could not be matched to another section type.
-      - prefix(github.com/siderolabs/go-circular/) # Custom section: groups all imports with the specified Prefix.
+      - localmodule
   gocognit:
     min-complexity: 30
   nestif:
