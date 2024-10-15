@@ -108,6 +108,95 @@ func TestWrites(t *testing.T) {
 	}
 }
 
+// TestStreamingUnboundedReadWriter tests the streaming reader and writer without any checks for all data read.
+//
+// Reader and writer are running concurrently, writer writes data to the buffer, and reader reads data from the buffer.
+// This test is primary for testing race-conditions and other panic scenarios vs. correctness.
+//
+// The test TestStreamingReadWriter is similar to this test, but it checks the data read by the reader.
+func TestStreamingUnboundedReadWriter(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+
+		options []circular.OptionFunc
+	}{
+		{
+			name: "no chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(201),
+				circular.WithMaxCapacity(65532),
+			},
+		},
+		{
+			name: "chunks",
+
+			options: []circular.OptionFunc{
+				circular.WithInitialCapacity(137),
+				circular.WithMaxCapacity(4987),
+				circular.WithNumCompressedChunks(12, must.Value(zstd.NewCompressor())(t)),
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			req := require.New(t)
+			asrt := assert.New(t)
+
+			buf, err := circular.NewBuffer(test.options...)
+			req.NoError(err)
+
+			r := buf.GetStreamingReader()
+
+			size := 10 * 1048576
+
+			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, int64(size)))
+			req.NoError(err)
+
+			var wg sync.WaitGroup
+			defer wg.Wait()
+
+			wg.Add(1)
+
+			go func() {
+				defer wg.Done()
+
+				nRead, copyErr := io.CopyBuffer(io.Discard, r, make([]byte, 41))
+
+				t.Logf("read %d bytes", nRead)
+
+				asrt.Error(copyErr)
+				asrt.ErrorIs(copyErr, circular.ErrClosed)
+			}()
+
+			p := data
+
+			for i := 0; i < len(data); {
+				l := 100 + int(rand.Int32N(100))
+
+				if i+l > len(data) {
+					l = len(data) - i
+				}
+
+				n, e := buf.Write(p[:l])
+				req.NoError(e)
+
+				req.Equal(l, n)
+
+				i += l
+				p = p[l:]
+			}
+
+			time.Sleep(50 * time.Millisecond) // wait for the reader goroutine to process data
+
+			req.NoError(r.Close())
+		})
+	}
+}
+
 func TestStreamingReadWriter(t *testing.T) {
 	t.Parallel()
 

@@ -7,6 +7,8 @@ package circular
 import (
 	"io"
 	"sync/atomic"
+
+	"github.com/siderolabs/gen/optional"
 )
 
 // Reader implements seekable reader with local position in the Buffer which
@@ -18,8 +20,8 @@ type Reader struct {
 
 	// if reading from a compressed chunk, chunk is set to non-nil value
 	// decompressedChunk is used to store the decompressed chunk, and also re-used as a decompression buffer
-	chunk             *chunk
 	decompressedChunk []byte
+	chunk             optional.Optional[chunk]
 
 	startOff, endOff int64
 	off              int64
@@ -49,9 +51,9 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		return n, nil
 	}
 
-	if r.chunk != nil {
+	if currentChunk, ok := r.chunk.Get(); ok {
 		// how much we can read from the current chunk
-		nn := min(r.endOff, r.chunk.startOffset+r.chunk.size) - r.off
+		nn := min(r.endOff, currentChunk.startOffset+currentChunk.size) - r.off
 
 		if nn == 0 {
 			// switch to the next chunk, or if no chunk is found, switch to the circular buffer
@@ -62,15 +64,15 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 			r.seekChunk()
 			r.buf.mu.Unlock()
 
-			if r.chunk != nil {
-				nn = min(r.endOff, r.chunk.startOffset+r.chunk.size) - r.off
+			if currentChunk, ok := r.chunk.Get(); ok {
+				nn = min(r.endOff, currentChunk.startOffset+currentChunk.size) - r.off
 			}
 		}
 
 		// if r.chunk == nil, we need to switch to the last chunk as a circular buffer, so fallthrough below
-		if r.chunk != nil {
+		if currentChunk, ok := r.chunk.Get(); ok {
 			if len(r.decompressedChunk) == 0 {
-				r.decompressedChunk, err = r.buf.opt.Compressor.Decompress(r.chunk.compressed, r.decompressedChunk)
+				r.decompressedChunk, err = r.buf.opt.Compressor.Decompress(currentChunk.compressed, r.decompressedChunk)
 				if err != nil {
 					return n, err
 				}
@@ -80,7 +82,7 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 				nn = int64(len(p))
 			}
 
-			copy(p, r.decompressedChunk[r.off-r.chunk.startOffset:r.off-r.chunk.startOffset+nn])
+			copy(p, r.decompressedChunk[r.off-currentChunk.startOffset:r.off-currentChunk.startOffset+nn])
 
 			n = int(nn)
 			r.off += nn
@@ -97,7 +99,7 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		// check if there is a chunk that has r.off in its range
 		r.seekChunk()
 
-		if r.chunk != nil {
+		if r.chunk.IsPresent() {
 			return r.Read(p)
 		}
 
@@ -124,13 +126,11 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		n = int(r.endOff - r.off)
 	}
 
-	if n > len(p) {
-		n = len(p)
-	}
+	n = min(min(n, len(p)), cap(r.buf.data))
 
 	i := int(r.off % int64(r.buf.opt.MaxCapacity))
 
-	if l := r.buf.opt.MaxCapacity - i; l < n {
+	if l := cap(r.buf.data) - i; l < n {
 		copy(p, r.buf.data[i:])
 		copy(p[l:], r.buf.data[:n-l])
 	} else {
@@ -183,8 +183,8 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 
 	r.off = newOff
 
-	if r.chunk != nil {
-		if r.off < r.chunk.startOffset || r.off >= r.chunk.startOffset+r.chunk.size {
+	if currentChunk, ok := r.chunk.Get(); ok {
+		if r.off < currentChunk.startOffset || r.off >= currentChunk.startOffset+currentChunk.size {
 			// we fell out of the chunk
 			r.resetChunk()
 		} else {
@@ -199,7 +199,7 @@ func (r *Reader) Seek(offset int64, whence int) (int64, error) {
 	r.seekChunk()
 
 	// in streaming mode, make sure the offset is within the buffer
-	if r.streaming && r.chunk == nil {
+	if r.streaming && !r.chunk.IsPresent() {
 		if len(r.buf.chunks) > 0 {
 			if r.off < r.buf.chunks[0].startOffset {
 				r.off = r.buf.chunks[0].startOffset
@@ -222,7 +222,7 @@ func (r *Reader) seekChunk() {
 	for i, c := range r.buf.chunks {
 		if r.off >= c.startOffset && r.off < c.startOffset+c.size {
 			// we found the chunk
-			r.chunk = &r.buf.chunks[i]
+			r.chunk = optional.Some(r.buf.chunks[i])
 
 			break
 		}
@@ -231,7 +231,7 @@ func (r *Reader) seekChunk() {
 
 // resetChunk resets the current chunk and decompressed chunk.
 func (r *Reader) resetChunk() {
-	r.chunk = nil
+	r.chunk = optional.None[chunk]()
 
 	if r.decompressedChunk != nil {
 		r.decompressedChunk = r.decompressedChunk[:0]

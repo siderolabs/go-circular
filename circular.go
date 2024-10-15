@@ -11,6 +11,8 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+
+	"github.com/siderolabs/gen/optional"
 )
 
 // Buffer implements circular buffer with a thread-safe writer,
@@ -147,14 +149,8 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 		p = p[nn:]
 
 		if rotate && buf.opt.NumCompressedChunks > 0 {
-			var compressionBuf []byte
-
-			if len(buf.chunks) == buf.opt.NumCompressedChunks {
-				// going to drop the chunk, so reuse its buffer
-				compressionBuf = buf.chunks[0].compressed[:0]
-			}
-
-			compressed, err := buf.opt.Compressor.Compress(buf.data, compressionBuf)
+			// we can't reuse any of the chunk buffers, as they might be referenced by readers
+			compressed, err := buf.opt.Compressor.Compress(buf.data, nil)
 			if err != nil {
 				return n, err
 			}
@@ -285,7 +281,7 @@ func (buf *Buffer) GetReader() *Reader {
 		return &Reader{
 			buf: buf,
 
-			chunk: &oldestChunk,
+			chunk: optional.Some(oldestChunk),
 
 			startOff: oldestChunk.startOffset,
 			endOff:   buf.off,
