@@ -539,13 +539,15 @@ func TestStreamingSeek(t *testing.T) {
 			buf, err := circular.NewBuffer(test.options...)
 			req.NoError(err)
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
+			n, err := buf.Write(bytes.Repeat([]byte{0xff}, 512))
 			req.NoError(err)
+			req.Equal(512, n)
 
 			r := buf.GetStreamingReader()
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
 			req.NoError(err)
+			req.Equal(512, n)
 
 			off, err := r.Seek(0, io.SeekCurrent)
 			req.NoError(err)
@@ -553,7 +555,7 @@ func TestStreamingSeek(t *testing.T) {
 
 			data := make([]byte, 256)
 
-			n, err := r.Read(data)
+			n, err = r.Read(data)
 			req.NoError(err)
 			asrt.Equal(256, n)
 			asrt.Equal(bytes.Repeat([]byte{0xff}, 256), data)
@@ -575,8 +577,9 @@ func TestStreamingSeek(t *testing.T) {
 			req.NoError(err)
 			asrt.EqualValues(1024, off)
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
 			req.NoError(err)
+			req.Equal(65536-256, n)
 
 			off, err = r.Seek(0, io.SeekStart)
 			req.NoError(err)
@@ -664,13 +667,15 @@ func TestRegularReader(t *testing.T) {
 			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, int64(test.size)))
 			req.NoError(err)
 
-			_, err = buf.Write(data)
+			n, err := buf.Write(data)
 			req.NoError(err)
+			req.Equal(test.size, n)
 
 			r := buf.GetReader()
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
 			req.NoError(err)
+			req.Equal(512, n)
 
 			actual, err := io.ReadAll(r)
 			req.NoError(err)
@@ -732,13 +737,15 @@ func TestRegularReaderOutOfSync(t *testing.T) {
 			data, err := io.ReadAll(io.LimitReader(cryptorand.Reader, 512))
 			req.NoError(err)
 
-			_, err = buf.Write(data)
+			n, err := buf.Write(data)
 			req.NoError(err)
+			req.Equal(512, n)
 
 			r := buf.GetReader()
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
 			req.NoError(err)
+			req.Equal(65536-256, n)
 
 			actual := make([]byte, 512)
 			_, err = r.Read(actual)
@@ -795,13 +802,15 @@ func TestRegularReaderSafetyGap(t *testing.T) {
 			buf, err := circular.NewBuffer(test.options...)
 			req.NoError(err)
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xff}, 6146))
+			n, err := buf.Write(bytes.Repeat([]byte{0xff}, 6146))
 			req.NoError(err)
+			req.Equal(6146, n)
 
 			r := buf.GetReader()
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 100))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 100))
 			req.NoError(err)
+			req.Equal(100, n)
 
 			actual, err := io.ReadAll(r)
 			req.NoError(err)
@@ -868,11 +877,13 @@ func TestRegularSeek(t *testing.T) {
 			buf, err := circular.NewBuffer(test.options...)
 			req.NoError(err)
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xff}, 512))
+			n, err := buf.Write(bytes.Repeat([]byte{0xff}, 512))
 			req.NoError(err)
+			req.Equal(512, n)
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 512))
 			req.NoError(err)
+			req.Equal(512, n)
 
 			r := buf.GetReader()
 
@@ -885,7 +896,7 @@ func TestRegularSeek(t *testing.T) {
 
 			data := make([]byte, 256)
 
-			n, err := r.Read(data)
+			n, err = r.Read(data)
 			req.NoError(err)
 			req.Equal(256, n)
 			req.Equal(bytes.Repeat([]byte{0xff}, 256), data)
@@ -907,8 +918,9 @@ func TestRegularSeek(t *testing.T) {
 			req.NoError(err)
 			asrt.EqualValues(1024, off)
 
-			_, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
+			n, err = buf.Write(bytes.Repeat([]byte{0xfe}, 65536-256))
 			req.NoError(err)
+			req.Equal(65536-256, n)
 
 			off, err = r.Seek(0, io.SeekStart)
 			req.NoError(err)
