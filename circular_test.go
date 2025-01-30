@@ -87,7 +87,11 @@ func TestWrites(t *testing.T) {
 			req.NoError(err)
 			req.Equal(5000, n)
 
-			req.Equal(8192, buf.Capacity())
+			// capacity might grow to a number specific to the way `slices.Grow` works,
+			// but it should be within reasonable bounds
+			req.GreaterOrEqual(buf.Capacity(), 8192)
+			req.LessOrEqual(buf.Capacity(), 16384)
+
 			req.EqualValues(6100, buf.Offset())
 
 			for i := range 20 {

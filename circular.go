@@ -112,7 +112,7 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 	defer buf.mu.Unlock()
 
 	if buf.off < int64(buf.opt.MaxCapacity) {
-		if buf.off+int64(l) > int64(cap(buf.data)) && cap(buf.data) < buf.opt.MaxCapacity {
+		if buf.off+int64(l) > int64(buf.capacity()) && buf.capacity() < buf.opt.MaxCapacity {
 			// grow buffer to ensure write fits, but limit with max capacity
 			size := cap(buf.data) * 2
 			for size < int(buf.off)+l {
@@ -123,9 +123,9 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 				size = buf.opt.MaxCapacity
 			}
 
-			data := make([]byte, size)
-			copy(data, buf.data)
-			buf.data = data
+			// grow and adjust length to the desired capacity
+			data := slices.Grow(buf.data, size)
+			buf.data = data[:min(cap(data), buf.opt.MaxCapacity)]
 		}
 	}
 
@@ -193,12 +193,20 @@ func (buf *Buffer) Write(p []byte) (int, error) {
 	return n, nil
 }
 
+// capacity returns the current buffer capacity.
+func (buf *Buffer) capacity() int {
+	// we return length here, not capacity, as the buffer might be larger due to the way slices.Grow works
+	//
+	// this is the useable length of the buffer, we might grow it (and actual capacity might or might not grow, leave it to slices.Grow)
+	return len(buf.data)
+}
+
 // Capacity returns number of bytes allocated for the buffer.
 func (buf *Buffer) Capacity() int {
 	buf.mu.Lock()
 	defer buf.mu.Unlock()
 
-	return cap(buf.data)
+	return buf.capacity()
 }
 
 // MaxCapacity returns maximum number of (decompressed) bytes (including compressed chunks) that can be stored in the buffer.
@@ -225,7 +233,7 @@ func (buf *Buffer) TotalCompressedSize() int64 {
 		size += int64(len(c.compressed))
 	}
 
-	return size + int64(cap(buf.data))
+	return size + int64(buf.capacity())
 }
 
 // TotalSize reports overall number of bytes available for reading in the buffer.
@@ -237,11 +245,7 @@ func (buf *Buffer) TotalSize() int64 {
 	defer buf.mu.Unlock()
 
 	if len(buf.chunks) == 0 {
-		if buf.off < int64(cap(buf.data)) {
-			return buf.off
-		}
-
-		return int64(cap(buf.data))
+		return min(int64(buf.capacity()), buf.off)
 	}
 
 	return buf.off - buf.chunks[0].startOffset

@@ -126,11 +126,11 @@ func (r *Reader) Read(p []byte) (n int, err error) {
 		n = int(r.endOff - r.off)
 	}
 
-	n = min(min(n, len(p)), cap(r.buf.data))
+	n = min(min(n, len(p)), r.buf.capacity())
 
 	i := int(r.off % int64(r.buf.opt.MaxCapacity))
 
-	if l := cap(r.buf.data) - i; l < n {
+	if l := r.buf.capacity() - i; l < n {
 		copy(p, r.buf.data[i:])
 		copy(p[l:], r.buf.data[:n-l])
 	} else {

@@ -19,7 +19,6 @@ import (
 	"go.uber.org/zap"
 )
 
-//nolint:gocognit
 func (buf *Buffer) load() error {
 	if buf.opt.PersistenceOptions.ChunkPath == "" {
 		// persistence is disabled
@@ -97,18 +96,14 @@ func (buf *Buffer) load() error {
 			if err != nil {
 				buf.opt.Logger.Error("failed to decompress zero chunk, skipping", zap.String("path", chunkPath.path), zap.Error(err))
 
-				buf.data = buf.data[:cap(buf.data)]
+				buf.data = buf.data[:min(cap(buf.data), buf.opt.MaxCapacity)]
 
 				continue
 			}
 
 			buf.off = int64(len(buf.data))
 
-			if cap(buf.data) > buf.opt.MaxCapacity {
-				buf.data = buf.data[:buf.opt.MaxCapacity:buf.opt.MaxCapacity]
-			} else {
-				buf.data = buf.data[:cap(buf.data)]
-			}
+			buf.data = buf.data[:min(cap(buf.data), buf.opt.MaxCapacity)]
 		} else {
 			decompressedSize, err := buf.opt.Compressor.DecompressedSize(data)
 			if err != nil {
@@ -276,7 +271,7 @@ func (buf *Buffer) persistCurrentChunk(currentOffset, lastPersistedOffset int64,
 	}
 
 	buf.mu.Lock()
-	data := slices.Clone(buf.data[:currentOffset%int64(cap(buf.data))])
+	data := slices.Clone(buf.data[:currentOffset%int64(buf.capacity())])
 	buf.mu.Unlock()
 
 	compressed, err := buf.opt.Compressor.Compress(data, nil)
