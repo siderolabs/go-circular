@@ -6,7 +6,6 @@ package circular_test
 
 import (
 	"bytes"
-	"context"
 	cryptorand "crypto/rand"
 	"fmt"
 	"io"
@@ -262,7 +261,7 @@ func TestStreamingReadWriter(t *testing.T) {
 						l = len(data) - i
 					}
 
-					r.WaitN(context.Background(), l) //nolint:errcheck
+					r.WaitN(t.Context(), l) //nolint:errcheck
 
 					n, e := buf.Write(p[:l])
 					if e != nil {
@@ -391,7 +390,7 @@ func TestStreamingMultipleReaders(t *testing.T) {
 					l = len(data) - i
 				}
 
-				r.WaitN(context.Background(), l) //nolint:errcheck
+				r.WaitN(t.Context(), l) //nolint:errcheck
 
 				n, e := buf.Write(p[:l])
 				req.NoError(e)

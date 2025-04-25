@@ -236,6 +236,10 @@ persistLoop:
 
 				// as the new chunk was just created, the .0 chunk should be removed now, as its contents were compressed away
 				if err := os.Remove(chunkPath0); err != nil {
+					if os.IsNotExist(err) {
+						continue // ignore, it was never written
+					}
+
 					buf.opt.Logger.Error("failed to remove chunk", zap.String("path", chunkPath0), zap.Error(err))
 				} else {
 					buf.opt.Logger.Debug("dropped current chunk, as it was rotated", zap.String("path", chunkPath0))
